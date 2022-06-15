@@ -8,12 +8,12 @@ license = "MIT/Apache-2.0"
 name = "monoio-codec"
 readme = "README.md"
 repository = "https://github.com/monoio-rs/monoio-codec"
-version = "0.0.1"
+version = "0.0.2"
 
 [dependencies]
 bytes = {version = "1"}
-monoio = {version = "0.0.6", default_features = false, path = "../monoio/monoio"}
+monoio = {version = "0.0.7", default_features = false, path = "../monoio/monoio"}
 tokio-util = {version = "0.7", default_features = false, features = ["codec"]}
 
 [dev-dependencies]
-monoio = {version = "0.0.6", path = "../monoio/monoio", features = ["macros"]}
+monoio = {version = "0.0.7", path = "../monoio/monoio", features = ["macros"]}

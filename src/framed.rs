@@ -96,24 +96,22 @@ impl<IO, Codec, S> FramedInner<IO, Codec, S> {
     fn new(io: IO, codec: Codec, state: S) -> Self {
         Self { io, codec, state }
     }
-}
-
-impl<IO, Codec, S> Stream for FramedInner<IO, Codec, S>
-where
-    IO: AsyncReadRent,
-    Codec: Decoder,
-    S: BorrowMut<ReadState>,
-{
-    type Item = Result<Codec::Item, Codec::Error>;
-
-    type NextFuture<'a> = impl Future<Output = Option<Self::Item>> where Self: 'a;
 
     // In tokio there are 5 states. But since we use pure async here,
     // we do not need to return Pending so we don't need to save the state
     // when Penging returned. We only need to save state when return
     // `Option<Item>`.
     // We have 4 states: Framing, Pausing, Paused and Errored.
-    fn next(&mut self) -> Self::NextFuture<'_> {
+    async fn next_with(
+        io: &mut IO,
+        codec: &mut Codec,
+        state: &mut S,
+    ) -> Option<Result<Codec::Item, Codec::Error>>
+    where
+        IO: AsyncReadRent,
+        Codec: Decoder,
+        S: BorrowMut<ReadState>,
+    {
         macro_rules! ok {
             ($result: expr, $state: expr) => {
                 match $result {
@@ -126,68 +124,78 @@ where
             };
         }
 
-        async move {
-            let read_state: &mut ReadState = self.state.borrow_mut();
-            let io = &mut self.io;
-            let state = &mut read_state.state;
-            let buffer = &mut read_state.buffer;
+        let read_state: &mut ReadState = state.borrow_mut();
+        let state = &mut read_state.state;
+        let buffer = &mut read_state.buffer;
 
-            loop {
-                match state {
-                    // On framing, we will decode first. If the decoder needs more data,
-                    // we will do read and await it.
-                    // If we get an error or eof, we will transfer state.
-                    State::Framing => loop {
-                        if !buffer.is_empty() {
-                            if let Some(item) = ok!(self.codec.decode(buffer), state) {
-                                return Some(Ok(item));
-                            }
+        loop {
+            match state {
+                // On framing, we will decode first. If the decoder needs more data,
+                // we will do read and await it.
+                // If we get an error or eof, we will transfer state.
+                State::Framing => loop {
+                    if !buffer.is_empty() {
+                        if let Some(item) = ok!(codec.decode(buffer), state) {
+                            return Some(Ok(item));
                         }
-                        let slice_to_write = buffer.chunk_mut();
-                        let raw_buf = unsafe {
-                            RawBuf::new(slice_to_write.as_mut_ptr(), slice_to_write.len())
-                        };
-                        let n = ok!(io.read(raw_buf).await.0, state);
-                        if n == 0 {
-                            *state = State::Pausing;
-                            break;
-                        }
-                        unsafe { buffer.advance_mut(n) };
-                    },
-                    // On Pausing, we will loop decode_eof until None or Error.
-                    State::Pausing => {
-                        return match ok!(self.codec.decode_eof(buffer), state) {
-                            Some(item) => Some(Ok(item)),
-                            None => {
-                                // Buffer has no data, we can transfer to Paused.
-                                *state = State::Paused;
-                                None
-                            }
-                        };
                     }
-                    // On Paused, we need to read directly.
-                    State::Paused => {
-                        let slice_to_write = buffer.chunk_mut();
-                        let raw_buf = unsafe {
-                            RawBuf::new(slice_to_write.as_mut_ptr(), slice_to_write.len())
-                        };
-                        let n = ok!(io.read(raw_buf).await.0, state);
-                        if n == 0 {
-                            // still paused
-                            return None;
-                        }
-                        // read something, then we move to framing state
-                        unsafe { buffer.advance_mut(n) };
-                        *state = State::Framing;
+                    let slice_to_write = buffer.chunk_mut();
+                    let raw_buf =
+                        unsafe { RawBuf::new(slice_to_write.as_mut_ptr(), slice_to_write.len()) };
+                    let n = ok!(io.read(raw_buf).await.0, state);
+                    if n == 0 {
+                        *state = State::Pausing;
+                        break;
                     }
-                    // On Errored, we need to return None and trans to Paused.
-                    State::Errored => {
-                        *state = State::Paused;
+                    unsafe { buffer.advance_mut(n) };
+                },
+                // On Pausing, we will loop decode_eof until None or Error.
+                State::Pausing => {
+                    return match ok!(codec.decode_eof(buffer), state) {
+                        Some(item) => Some(Ok(item)),
+                        None => {
+                            // Buffer has no data, we can transfer to Paused.
+                            *state = State::Paused;
+                            None
+                        }
+                    };
+                }
+                // On Paused, we need to read directly.
+                State::Paused => {
+                    let slice_to_write = buffer.chunk_mut();
+                    let raw_buf =
+                        unsafe { RawBuf::new(slice_to_write.as_mut_ptr(), slice_to_write.len()) };
+                    let n = ok!(io.read(raw_buf).await.0, state);
+                    if n == 0 {
+                        // still paused
                         return None;
                     }
+                    // read something, then we move to framing state
+                    unsafe { buffer.advance_mut(n) };
+                    *state = State::Framing;
+                }
+                // On Errored, we need to return None and trans to Paused.
+                State::Errored => {
+                    *state = State::Paused;
+                    return None;
                 }
             }
         }
+    }
+}
+
+impl<IO, Codec, S> Stream for FramedInner<IO, Codec, S>
+where
+    IO: AsyncReadRent,
+    Codec: Decoder,
+    S: BorrowMut<ReadState>,
+{
+    type Item = Result<Codec::Item, Codec::Error>;
+
+    type NextFuture<'a> = impl Future<Output = Option<Self::Item>> where Self: 'a;
+
+    fn next(&mut self) -> Self::NextFuture<'_> {
+        Self::next_with(&mut self.io, &mut self.codec, &mut self.state)
     }
 }
 
@@ -369,6 +377,17 @@ impl<IO, Codec> Framed<IO, Codec> {
     pub fn into_inner(self) -> IO {
         self.inner.io
     }
+
+    /// Equivalent to Stream::next but with custom codec.
+    pub async fn next_with<C: Decoder>(
+        &mut self,
+        codec: &mut C,
+    ) -> Option<Result<C::Item, C::Error>>
+    where
+        IO: AsyncReadRent,
+    {
+        FramedInner::next_with(&mut self.inner.io, codec, &mut self.inner.state).await
+    }
 }
 
 impl<T, U> fmt::Debug for Framed<T, U>
@@ -460,6 +479,17 @@ impl<IO, Codec> FramedRead<IO, Codec> {
     /// Returns a mutable reference to the read buffer.
     pub fn read_buffer_mut(&mut self) -> &mut BytesMut {
         &mut self.inner.state.buffer
+    }
+
+    /// Equivalent to Stream::next but with custom codec.
+    pub async fn next_with<C: Decoder>(
+        &mut self,
+        codec: &mut C,
+    ) -> Option<Result<C::Item, C::Error>>
+    where
+        IO: AsyncReadRent,
+    {
+        FramedInner::next_with(&mut self.inner.io, codec, &mut self.inner.state).await
     }
 }
 
