@@ -6,16 +6,17 @@ use std::{
     future::Future,
 };
 
-use bytes::{Buf, BufMut, BytesMut};
+use bytes::{BufMut, BytesMut};
 use monoio::{
-    buf::RawBuf,
-    io::{sink::Sink, stream::Stream, AsyncReadRent, AsyncWriteRent},
+    buf::{SliceMut, IoBufMut},
+    io::{sink::Sink, stream::Stream, AsyncReadRent, AsyncWriteRent, AsyncWriteRentExt},
 };
 
 use crate::{Decoder, Encoder};
 
 const INITIAL_CAPACITY: usize = 8 * 1024;
 const BACKPRESSURE_BOUNDARY: usize = INITIAL_CAPACITY;
+const RESERVE: usize = 1024;
 
 pub struct FramedInner<IO, Codec, S> {
     io: IO,
@@ -139,15 +140,24 @@ impl<IO, Codec, S> FramedInner<IO, Codec, S> {
                             return Some(Ok(item));
                         }
                     }
-                    let slice_to_write = buffer.chunk_mut();
-                    let raw_buf =
-                        unsafe { RawBuf::new(slice_to_write.as_mut_ptr(), slice_to_write.len()) };
-                    let n = ok!(io.read(raw_buf).await.0, state);
+                    buffer.reserve(RESERVE);
+                    let (begin, end) = {
+                        let buffer_ptr = buffer.write_ptr();
+                        let slice_to_write = buffer.chunk_mut();
+                        let begin =
+                            unsafe { slice_to_write.as_mut_ptr().offset_from(buffer_ptr) } as usize;
+                        let end = begin + slice_to_write.len();
+                        (begin, end)
+                    };
+                    let owned_buf = std::mem::replace(buffer, BytesMut::new());
+                    let owned_slice = unsafe { SliceMut::new_unchecked(owned_buf, begin, end) };
+                    let (result, owned_slice) = io.read(owned_slice).await;
+                    *buffer = owned_slice.into_inner();
+                    let n = ok!(result, state);
                     if n == 0 {
                         *state = State::Pausing;
                         break;
                     }
-                    unsafe { buffer.advance_mut(n) };
                 },
                 // On Pausing, we will loop decode_eof until None or Error.
                 State::Pausing => {
@@ -162,16 +172,25 @@ impl<IO, Codec, S> FramedInner<IO, Codec, S> {
                 }
                 // On Paused, we need to read directly.
                 State::Paused => {
-                    let slice_to_write = buffer.chunk_mut();
-                    let raw_buf =
-                        unsafe { RawBuf::new(slice_to_write.as_mut_ptr(), slice_to_write.len()) };
-                    let n = ok!(io.read(raw_buf).await.0, state);
+                    buffer.reserve(RESERVE);
+                    let (begin, end) = {
+                        let buffer_ptr = buffer.write_ptr();
+                        let slice_to_write = buffer.chunk_mut();
+                        let begin =
+                            unsafe { slice_to_write.as_mut_ptr().offset_from(buffer_ptr) } as usize;
+                        let end = begin + slice_to_write.len();
+                        (begin, end)
+                    };
+                    let owned_buf = std::mem::replace(buffer, BytesMut::new());
+                    let owned_slice = unsafe { SliceMut::new_unchecked(owned_buf, begin, end) };
+                    let (result, owned_slice) = io.read(owned_slice).await;
+                    *buffer = owned_slice.into_inner();
+                    let n = ok!(result, state);
                     if n == 0 {
                         // still paused
                         return None;
                     }
                     // read something, then we move to framing state
-                    unsafe { buffer.advance_mut(n) };
                     *state = State::Framing;
                 }
                 // On Errored, we need to return None and trans to Paused.
@@ -227,25 +246,15 @@ where
     fn flush(&mut self) -> Self::FlushFuture<'_> {
         async move {
             let WriteState { buffer } = self.state.borrow_mut();
-            // TODO: use iovec
-            while !buffer.is_empty() {
-                let buf = buffer.chunk();
-                let raw_buf = unsafe { RawBuf::new(buf.as_ptr(), buf.len()) };
-                match self.io.write(raw_buf).await.0 {
-                    Ok(0) => {
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::UnexpectedEof,
-                            "failed to write whole buffer",
-                        )
-                        .into());
-                    }
-                    Ok(n) => {
-                        buffer.advance(n);
-                    }
-                    Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                    Err(e) => return Err(e.into()),
-                }
+            if buffer.is_empty() {
+                return Ok(());
             }
+            // This action does not allocate.
+            let buf = std::mem::replace(buffer, BytesMut::new());
+            let (result, buf) = self.io.write_all(buf).await;
+            *buffer = buf;
+            result?;
+            buffer.clear();
             self.io.flush().await?;
             Ok(())
         }
