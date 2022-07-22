@@ -222,13 +222,15 @@ struct Mock {
     calls: VecDeque<io::Result<Vec<u8>>>,
 }
 
+use monoio::buf::{IoBufMut, IoVecBufMut};
+
 impl AsyncReadRent for Mock {
     type ReadFuture<'a, B> = impl std::future::Future<Output = monoio::BufResult<usize, B>> where
-        B: 'a;
+        B: IoBufMut + 'a;
     type ReadvFuture<'a, B> = impl std::future::Future<Output = monoio::BufResult<usize, B>> where
-        B: 'a;
+        B: IoVecBufMut + 'a;
 
-    fn read<T: monoio::buf::IoBufMut>(&mut self, mut buf: T) -> Self::ReadFuture<'_, T> {
+    fn read<T: IoBufMut>(&mut self, mut buf: T) -> Self::ReadFuture<'_, T> {
         async {
             match self.calls.pop_front() {
                 Some(Ok(data)) => {
@@ -246,7 +248,7 @@ impl AsyncReadRent for Mock {
         }
     }
 
-    fn readv<T: monoio::buf::IoVecBufMut>(&mut self, mut buf: T) -> Self::ReadvFuture<'_, T> {
+    fn readv<T: IoVecBufMut>(&mut self, mut buf: T) -> Self::ReadvFuture<'_, T> {
         async move {
             let n = match unsafe { RawBuf::new_from_iovec_mut(&mut buf) } {
                 Some(raw_buf) => self.read(raw_buf).await.0,

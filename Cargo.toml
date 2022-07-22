@@ -8,11 +8,11 @@ license = "MIT/Apache-2.0"
 name = "monoio-codec"
 readme = "README.md"
 repository = "https://github.com/monoio-rs/monoio-codec"
-version = "0.0.2"
+version = "0.0.3"
 
 [dependencies]
 bytes = {version = "1"}
-monoio = {version = "0.0.7", default_features = false, path = "../monoio/monoio"}
+monoio = {version = "0.0.7", default_features = false, features = ["bytes"], path = "../monoio/monoio"}
 tokio-util = {version = "0.7", default_features = false, features = ["codec"]}
 
 [dev-dependencies]

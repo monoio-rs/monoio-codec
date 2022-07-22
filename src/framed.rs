@@ -8,7 +8,7 @@ use std::{
 
 use bytes::{BufMut, BytesMut};
 use monoio::{
-    buf::{SliceMut, IoBufMut},
+    buf::{IoBufMut, SliceMut},
     io::{sink::Sink, stream::Stream, AsyncReadRent, AsyncWriteRent, AsyncWriteRentExt},
 };
 
@@ -616,7 +616,7 @@ where
 
     #[inline]
     fn next(&mut self) -> Self::NextFuture<'_> {
-        (&mut self.inner).next()
+        self.inner.next()
     }
 }
 
