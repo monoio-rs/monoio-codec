@@ -1,5 +1,6 @@
 // Part of the helper functions and tests are borrowed from tokio-util.
 
+#![allow(stable_features)]
 #![feature(generic_associated_types)]
 #![feature(type_alias_impl_trait)]
 

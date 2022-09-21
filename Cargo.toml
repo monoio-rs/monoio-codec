@@ -12,8 +12,8 @@ version = "0.0.3"
 
 [dependencies]
 bytes = {version = "1"}
-monoio = {version = "0.0.7", default_features = false, features = ["bytes"], path = "../monoio/monoio"}
+monoio = {version = "0.0.8", default_features = false, features = ["bytes"], path = "../monoio/monoio"}
 tokio-util = {version = "0.7", default_features = false, features = ["codec"]}
 
 [dev-dependencies]
-monoio = {version = "0.0.7", path = "../monoio/monoio", features = ["macros"]}
+monoio = {version = "0.0.8", features = ["macros"], path = "../monoio/monoio"}
