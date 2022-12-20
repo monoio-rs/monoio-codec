@@ -211,7 +211,7 @@ where
 {
     type Item = Result<Codec::Item, Codec::Error>;
 
-    type NextFuture<'a> = impl Future<Output = Option<Self::Item>> where Self: 'a;
+    type NextFuture<'a> = impl Future<Output = Option<Self::Item>> + 'a where Self: 'a;
 
     fn next(&mut self) -> Self::NextFuture<'_> {
         Self::next_with(&mut self.io, &mut self.codec, &mut self.state)
@@ -223,14 +223,15 @@ where
     IO: AsyncWriteRent,
     Codec: Encoder<Item>,
     S: BorrowMut<WriteState>,
+    Item: 'static,
 {
     type Error = Codec::Error;
 
-    type SendFuture<'a> = impl Future<Output = Result<(), Self::Error>> where Self: 'a;
+    type SendFuture<'a> = impl Future<Output = Result<(), Self::Error>> + 'a where Self: 'a;
 
-    type FlushFuture<'a> = impl Future<Output = Result<(), Self::Error>> where Self: 'a;
+    type FlushFuture<'a> = impl Future<Output = Result<(), Self::Error>> + 'a where Self: 'a;
 
-    type CloseFuture<'a> = impl Future<Output = Result<(), Self::Error>> where Self: 'a;
+    type CloseFuture<'a> = impl Future<Output = Result<(), Self::Error>> + 'a where Self: 'a;
 
     fn send(&mut self, item: Item) -> Self::SendFuture<'_> {
         async move {
@@ -640,6 +641,7 @@ impl<IO, Codec, Item> Sink<Item> for Framed<IO, Codec>
 where
     IO: AsyncWriteRent,
     Codec: Encoder<Item>,
+    Item: 'static
 {
     type Error = <FramedInner<IO, Codec, RWState> as Sink<Item>>::Error;
 
@@ -675,6 +677,7 @@ impl<IO, Codec, Item> Sink<Item> for FramedWrite<IO, Codec>
 where
     IO: AsyncWriteRent,
     Codec: Encoder<Item>,
+    Item: 'static,
 {
     type Error = <FramedInner<IO, Codec, WriteState> as Sink<Item>>::Error;
 

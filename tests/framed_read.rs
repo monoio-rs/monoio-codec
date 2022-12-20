@@ -1,7 +1,6 @@
 // Part of the helper functions and tests are borrowed from tokio-util.
 
 #![allow(stable_features)]
-#![feature(generic_associated_types)]
 #![feature(type_alias_impl_trait)]
 
 use std::{collections::VecDeque, io};
@@ -226,9 +225,9 @@ struct Mock {
 use monoio::buf::{IoBufMut, IoVecBufMut};
 
 impl AsyncReadRent for Mock {
-    type ReadFuture<'a, B> = impl std::future::Future<Output = monoio::BufResult<usize, B>> where
+    type ReadFuture<'a, B> = impl std::future::Future<Output = monoio::BufResult<usize, B>> + 'a where
         B: IoBufMut + 'a;
-    type ReadvFuture<'a, B> = impl std::future::Future<Output = monoio::BufResult<usize, B>> where
+    type ReadvFuture<'a, B> = impl std::future::Future<Output = monoio::BufResult<usize, B>> + 'a where
         B: IoVecBufMut + 'a;
 
     fn read<T: IoBufMut>(&mut self, mut buf: T) -> Self::ReadFuture<'_, T> {
