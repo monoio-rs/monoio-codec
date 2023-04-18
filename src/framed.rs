@@ -16,7 +16,7 @@ use crate::{Decoder, Encoder};
 
 const INITIAL_CAPACITY: usize = 8 * 1024;
 const BACKPRESSURE_BOUNDARY: usize = INITIAL_CAPACITY;
-const RESERVE: usize = 1024;
+const RESERVE: usize = 4096;
 
 pub struct FramedInner<IO, Codec, S> {
     io: IO,
@@ -223,17 +223,19 @@ where
     IO: AsyncWriteRent,
     Codec: Encoder<Item>,
     S: BorrowMut<WriteState>,
-    Item: 'static,
 {
     type Error = Codec::Error;
 
-    type SendFuture<'a> = impl Future<Output = Result<(), Self::Error>> + 'a where Self: 'a;
+    type SendFuture<'a> = impl Future<Output = Result<(), Self::Error>> + 'a where Self: 'a, Item: 'a;
 
     type FlushFuture<'a> = impl Future<Output = Result<(), Self::Error>> + 'a where Self: 'a;
 
     type CloseFuture<'a> = impl Future<Output = Result<(), Self::Error>> + 'a where Self: 'a;
 
-    fn send(&mut self, item: Item) -> Self::SendFuture<'_> {
+    fn send<'a>(&'a mut self, item: Item) -> Self::SendFuture<'a>
+    where
+        Item: 'a,
+    {
         async move {
             if self.state.borrow_mut().buffer.len() > BACKPRESSURE_BOUNDARY {
                 self.flush().await?;
@@ -641,24 +643,27 @@ impl<IO, Codec, Item> Sink<Item> for Framed<IO, Codec>
 where
     IO: AsyncWriteRent,
     Codec: Encoder<Item>,
-    Item: 'static
 {
     type Error = <FramedInner<IO, Codec, RWState> as Sink<Item>>::Error;
 
     type SendFuture<'a> = <FramedInner<IO, Codec, RWState> as Sink<Item>>::SendFuture<'a>
     where
-        Self: 'a;
+        Self: 'a,
+        Item: 'a;
 
     type FlushFuture<'a> = <FramedInner<IO, Codec, RWState> as Sink<Item>>::FlushFuture<'a>
     where
         Self: 'a;
 
-    type CloseFuture<'a>=<FramedInner<IO, Codec, RWState> as Sink<Item>>::CloseFuture<'a>
+    type CloseFuture<'a> = <FramedInner<IO, Codec, RWState> as Sink<Item>>::CloseFuture<'a>
     where
         Self: 'a;
 
     #[inline]
-    fn send(&mut self, item: Item) -> Self::SendFuture<'_> {
+    fn send<'a>(&'a mut self, item: Item) -> Self::SendFuture<'a>
+    where
+        Item: 'a,
+    {
         self.inner.send(item)
     }
 
@@ -677,13 +682,13 @@ impl<IO, Codec, Item> Sink<Item> for FramedWrite<IO, Codec>
 where
     IO: AsyncWriteRent,
     Codec: Encoder<Item>,
-    Item: 'static,
 {
     type Error = <FramedInner<IO, Codec, WriteState> as Sink<Item>>::Error;
 
     type SendFuture<'a> = <FramedInner<IO, Codec, WriteState> as Sink<Item>>::SendFuture<'a>
     where
-        Self: 'a;
+        Self: 'a,
+        Item: 'a;
 
     type FlushFuture<'a> = <FramedInner<IO, Codec, WriteState> as Sink<Item>>::FlushFuture<'a>
     where
@@ -694,7 +699,10 @@ where
         Self: 'a;
 
     #[inline]
-    fn send(&mut self, item: Item) -> Self::SendFuture<'_> {
+    fn send<'a>(&'a mut self, item: Item) -> Self::SendFuture<'a>
+    where
+        Item: 'a,
+    {
         self.inner.send(item)
     }
 
