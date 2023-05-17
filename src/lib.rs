@@ -5,6 +5,7 @@
 
 mod async_codec;
 mod framed;
+pub mod length_delimited;
 
 pub use async_codec::{AsyncDecoder, AsyncEncoder};
 pub use framed::{Framed, FramedRead, FramedWrite};
