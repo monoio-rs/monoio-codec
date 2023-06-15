@@ -8,5 +8,5 @@ mod framed;
 pub mod length_delimited;
 
 pub use async_codec::{AsyncDecoder, AsyncEncoder};
-pub use framed::{Framed, FramedRead, FramedWrite};
+pub use framed::{Framed, FramedRead, FramedWrite, NextWithCodec};
 pub use tokio_util::codec::{Decoder, Encoder};

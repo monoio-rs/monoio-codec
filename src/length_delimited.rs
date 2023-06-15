@@ -18,7 +18,7 @@
 //!
 //! ```
 //! use monoio::io::{AsyncReadRent, AsyncWriteRent};
-//! use monoio_codec::{Framed, length_delimited::LengthDelimitedCodec};
+//! use monoio_codec::{length_delimited::LengthDelimitedCodec, Framed};
 //!
 //! fn bind_transport<T: AsyncReadRent + AsyncWriteRent>(io: T) -> Framed<T, LengthDelimitedCodec> {
 //!     Framed::new(io, LengthDelimitedCodec::new())
@@ -40,9 +40,8 @@
 //!
 //! ```
 //! use bytes::Bytes;
-//! use monoio::io::sink::Sink;
-//! use monoio::io::{AsyncReadRent, AsyncWriteRent};
-//! use monoio_codec::{Framed, length_delimited::LengthDelimitedCodec};
+//! use monoio::io::{sink::Sink, AsyncReadRent, AsyncWriteRent};
+//! use monoio_codec::{length_delimited::LengthDelimitedCodec, Framed};
 //!
 //! async fn write_frame<T>(io: T) -> Result<(), Box<dyn std::error::Error>>
 //! where

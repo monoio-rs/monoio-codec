@@ -100,7 +100,7 @@ impl<IO, Codec, S> FramedInner<IO, Codec, S> {
 
     // In tokio there are 5 states. But since we use pure async here,
     // we do not need to return Pending so we don't need to save the state
-    // when Penging returned. We only need to save state when return
+    // when Pending returned. We only need to save state when return
     // `Option<Item>`.
     // We have 4 states: Framing, Pausing, Paused and Errored.
     async fn next_with(
@@ -714,5 +714,40 @@ where
     #[inline]
     fn close(&mut self) -> Self::CloseFuture<'_> {
         self.inner.close()
+    }
+}
+
+pub trait NextWithCodec<T> {
+    type Item;
+    type NextFuture<'a>: std::future::Future<Output = Option<Self::Item>>
+    where
+        Self: 'a,
+        T: 'a;
+    fn next_with<'a>(&'a mut self, codec: &'a mut T) -> Self::NextFuture<'_>;
+}
+
+impl<Codec: Decoder, IO: AsyncReadRent, AnyCodec> NextWithCodec<Codec>
+    for FramedRead<IO, AnyCodec>
+{
+    type Item = Result<Codec::Item, Codec::Error>;
+    type NextFuture<'a> = impl std::future::Future<Output = Option<Self::Item>> + 'a
+    where
+        Self: 'a, Codec: 'a;
+
+    #[inline]
+    fn next_with<'a>(&'a mut self, codec: &'a mut Codec) -> Self::NextFuture<'_> {
+        FramedInner::next_with(&mut self.inner.io, codec, &mut self.inner.state)
+    }
+}
+
+impl<Codec: Decoder, IO: AsyncReadRent, AnyCodec> NextWithCodec<Codec> for Framed<IO, AnyCodec> {
+    type Item = Result<Codec::Item, Codec::Error>;
+    type NextFuture<'a> = impl std::future::Future<Output = Option<Self::Item>> + 'a
+    where
+        Self: 'a, Codec: 'a;
+
+    #[inline]
+    fn next_with<'a>(&'a mut self, codec: &'a mut Codec) -> Self::NextFuture<'_> {
+        FramedInner::next_with(&mut self.inner.io, codec, &mut self.inner.state)
     }
 }
