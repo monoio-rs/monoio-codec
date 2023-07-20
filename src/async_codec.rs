@@ -6,7 +6,7 @@ pub trait AsyncEncoder<Item> {
     where
         Self: 'a;
 
-    fn encode<IO>(&mut self, item: Item, dst: IO) -> Self::EncodeFuture<'_>;
+    fn encode<IO>(&mut self, item: Item, dst: &mut IO) -> Self::EncodeFuture<'_>;
 }
 
 pub trait AsyncDecoder {
@@ -16,5 +16,5 @@ pub trait AsyncDecoder {
     where
         Self: 'a;
 
-    fn decode<IO>(&mut self, src: IO) -> Self::DecodeFuture<'_>;
+    fn decode<IO>(&mut self, src: &mut IO) -> Self::DecodeFuture<'_>;
 }

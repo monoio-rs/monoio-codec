@@ -12,7 +12,7 @@ use monoio::{
     buf::RawBuf,
     io::{stream::Stream, AsyncReadRent},
 };
-use monoio_codec::{Decoder, FramedRead};
+use monoio_codec::{Decoded, Decoder, FramedRead};
 
 macro_rules! mock {
     ($($x:expr,)*) => {{
@@ -46,13 +46,13 @@ impl Decoder for U32Decoder {
     type Item = u32;
     type Error = io::Error;
 
-    fn decode(&mut self, buf: &mut BytesMut) -> io::Result<Option<u32>> {
+    fn decode(&mut self, buf: &mut BytesMut) -> io::Result<Decoded<u32>> {
         if buf.len() < 4 {
-            return Ok(None);
+            return Ok(Decoded::InsufficientAtLeast(4));
         }
 
         let n = buf.split_to(4).get_u32();
-        Ok(Some(n))
+        Ok(Decoded::Some(n))
     }
 }
 
@@ -62,13 +62,13 @@ impl Decoder for U64Decoder {
     type Item = u64;
     type Error = io::Error;
 
-    fn decode(&mut self, buf: &mut BytesMut) -> io::Result<Option<u64>> {
+    fn decode(&mut self, buf: &mut BytesMut) -> io::Result<Decoded<u64>> {
         if buf.len() < 8 {
-            return Ok(None);
+            return Ok(Decoded::InsufficientAtLeast(8));
         }
 
         let n = buf.split_to(8).get_u64();
-        Ok(Some(n))
+        Ok(Decoded::Some(n))
     }
 }
 
@@ -153,12 +153,13 @@ async fn huge_size() {
         type Item = u32;
         type Error = io::Error;
 
-        fn decode(&mut self, buf: &mut BytesMut) -> io::Result<Option<u32>> {
-            if buf.len() < 32 * 1024 {
-                return Ok(None);
+        fn decode(&mut self, buf: &mut BytesMut) -> io::Result<Decoded<u32>> {
+            const CNT: usize = 32 * 1024;
+            if buf.len() < CNT {
+                return Ok(Decoded::InsufficientAtLeast(CNT));
             }
-            buf.advance(32 * 1024);
-            Ok(Some(0))
+            buf.advance(CNT);
+            Ok(Decoded::Some(0))
         }
     }
 }
@@ -180,16 +181,16 @@ async fn multi_frames_on_eof() {
         type Item = u32;
         type Error = io::Error;
 
-        fn decode(&mut self, _buf: &mut BytesMut) -> io::Result<Option<u32>> {
+        fn decode(&mut self, _buf: &mut BytesMut) -> io::Result<Decoded<u32>> {
             unreachable!();
         }
 
-        fn decode_eof(&mut self, _buf: &mut BytesMut) -> io::Result<Option<u32>> {
+        fn decode_eof(&mut self, _buf: &mut BytesMut) -> io::Result<Decoded<u32>> {
             if self.0.is_empty() {
-                return Ok(None);
+                return Ok(Decoded::InsufficientUnknown);
             }
 
-            Ok(Some(self.0.remove(0)))
+            Ok(Decoded::Some(self.0.remove(0)))
         }
     }
 
