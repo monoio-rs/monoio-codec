@@ -6,13 +6,13 @@ use std::{
     future::Future,
 };
 
-use bytes::{BufMut, BytesMut};
+use bytes::{Buf, BufMut, BytesMut};
 use monoio::{
-    buf::{IoBufMut, SliceMut},
+    buf::{IoBufMut, IoVecBufMut, IoVecWrapperMut, SliceMut},
     io::{sink::Sink, stream::Stream, AsyncReadRent, AsyncWriteRent, AsyncWriteRentExt},
 };
 
-use crate::{Decoder, Encoder};
+use crate::{Decoded, Decoder, Encoder};
 
 const INITIAL_CAPACITY: usize = 8 * 1024;
 const BACKPRESSURE_BOUNDARY: usize = INITIAL_CAPACITY;
@@ -33,7 +33,7 @@ pub struct ReadState {
 impl ReadState {
     fn with_capacity(capacity: usize) -> Self {
         Self {
-            state: State::Framing,
+            state: State::Framing(None),
             buffer: BytesMut::with_capacity(capacity),
         }
     }
@@ -45,9 +45,9 @@ impl Default for ReadState {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
-    Framing,
+    Framing(Option<usize>),
     Pausing,
     Paused,
     Errored,
@@ -134,13 +134,26 @@ impl<IO, Codec, S> FramedInner<IO, Codec, S> {
                 // On framing, we will decode first. If the decoder needs more data,
                 // we will do read and await it.
                 // If we get an error or eof, we will transfer state.
-                State::Framing => loop {
-                    if !buffer.is_empty() {
-                        if let Some(item) = ok!(codec.decode(buffer), state) {
-                            return Some(Ok(item));
-                        }
+                State::Framing(hint) => loop {
+                    if !matches!(hint, Some(size) if buffer.len() < *size) && !buffer.is_empty() {
+                        // If we get a Some hint and the buffer length is less than it, we do not
+                        // decode. If the buffer is empty, we we do not decode.
+                        *hint = match ok!(codec.decode(buffer), state) {
+                            Decoded::Some(item) => {
+                                // When we decoded something, we should clear the hint.
+                                *hint = None;
+                                return Some(Ok(item));
+                            }
+                            Decoded::InsufficientUnknown => None,
+                            Decoded::InsufficientAtLeast(size) => Some(size),
+                        };
                     }
-                    buffer.reserve(RESERVE);
+
+                    let reserve = match *hint {
+                        Some(size) if size > buffer.len() => RESERVE.max(size - buffer.len()),
+                        _ => RESERVE,
+                    };
+                    buffer.reserve(reserve);
                     let (begin, end) = {
                         let buffer_ptr = buffer.write_ptr();
                         let slice_to_write = buffer.chunk_mut();
@@ -149,7 +162,7 @@ impl<IO, Codec, S> FramedInner<IO, Codec, S> {
                         let end = begin + slice_to_write.len();
                         (begin, end)
                     };
-                    let owned_buf = std::mem::replace(buffer, BytesMut::new());
+                    let owned_buf = std::mem::take(buffer);
                     let owned_slice = unsafe { SliceMut::new_unchecked(owned_buf, begin, end) };
                     let (result, owned_slice) = io.read(owned_slice).await;
                     *buffer = owned_slice.into_inner();
@@ -162,8 +175,8 @@ impl<IO, Codec, S> FramedInner<IO, Codec, S> {
                 // On Pausing, we will loop decode_eof until None or Error.
                 State::Pausing => {
                     return match ok!(codec.decode_eof(buffer), state) {
-                        Some(item) => Some(Ok(item)),
-                        None => {
+                        Decoded::Some(item) => Some(Ok(item)),
+                        _ => {
                             // Buffer has no data, we can transfer to Paused.
                             *state = State::Paused;
                             None
@@ -181,7 +194,7 @@ impl<IO, Codec, S> FramedInner<IO, Codec, S> {
                         let end = begin + slice_to_write.len();
                         (begin, end)
                     };
-                    let owned_buf = std::mem::replace(buffer, BytesMut::new());
+                    let owned_buf = std::mem::take(buffer);
                     let owned_slice = unsafe { SliceMut::new_unchecked(owned_buf, begin, end) };
                     let (result, owned_slice) = io.read(owned_slice).await;
                     *buffer = owned_slice.into_inner();
@@ -191,7 +204,7 @@ impl<IO, Codec, S> FramedInner<IO, Codec, S> {
                         return None;
                     }
                     // read something, then we move to framing state
-                    *state = State::Framing;
+                    *state = State::Framing(None);
                 }
                 // On Errored, we need to return None and trans to Paused.
                 State::Errored => {
@@ -199,6 +212,100 @@ impl<IO, Codec, S> FramedInner<IO, Codec, S> {
                     return None;
                 }
             }
+        }
+    }
+}
+
+impl<IO, Codec, S> AsyncReadRent for FramedInner<IO, Codec, S>
+where
+    IO: AsyncReadRent,
+    S: BorrowMut<ReadState>,
+{
+    type ReadFuture<'a, T> = impl Future<Output = monoio::BufResult<usize, T>> + 'a
+    where
+        T: IoBufMut + 'a, Self: 'a;
+
+    type ReadvFuture<'a, T> = impl Future<Output = monoio::BufResult<usize, T>> + 'a
+    where
+        T: IoVecBufMut + 'a, Self: 'a;
+
+    fn read<T: IoBufMut>(&mut self, mut buf: T) -> Self::ReadFuture<'_, T> {
+        async move {
+            let read_state: &mut ReadState = self.state.borrow_mut();
+            let state = &mut read_state.state;
+            let buffer = &mut read_state.buffer;
+
+            if buf.bytes_total() == 0 {
+                return (Ok(0), buf);
+            }
+
+            // Copy existing data if there is some.
+            let to_copy = buf.bytes_total().min(buffer.len());
+            if to_copy != 0 {
+                unsafe {
+                    buf.write_ptr()
+                        .copy_from_nonoverlapping(buffer.as_ptr(), to_copy);
+                    buf.set_init(to_copy);
+                }
+                buffer.advance(to_copy);
+                return (Ok(to_copy), buf);
+            }
+
+            // Read to buf directly if buf size is bigger than some threshold.
+            if buf.bytes_total() > INITIAL_CAPACITY {
+                let (res, buf) = self.io.read(buf).await;
+                return match res {
+                    Ok(0) => {
+                        *state = State::Pausing;
+                        (Ok(0), buf)
+                    }
+                    Ok(n) => (Ok(n), buf),
+                    Err(e) => {
+                        *state = State::Errored;
+                        (Err(e), buf)
+                    }
+                };
+            }
+            // Read to inner buffer and copy to buf.
+            buffer.reserve(INITIAL_CAPACITY);
+            let owned_buffer = std::mem::take(buffer);
+            let (res, owned_buffer) = self.io.read(owned_buffer).await;
+            *buffer = owned_buffer;
+            match res {
+                Ok(0) => {
+                    *state = State::Pausing;
+                    return (Ok(0), buf);
+                }
+                Err(e) => {
+                    *state = State::Errored;
+                    return (Err(e), buf);
+                }
+                _ => (),
+            }
+            let to_copy = buf.bytes_total().min(buffer.len());
+            unsafe {
+                buf.write_ptr()
+                    .copy_from_nonoverlapping(buffer.as_ptr(), to_copy);
+                buf.set_init(to_copy);
+            }
+            buffer.advance(to_copy);
+            (Ok(to_copy), buf)
+        }
+    }
+
+    fn readv<T: IoVecBufMut>(&mut self, mut buf: T) -> Self::ReadvFuture<'_, T> {
+        async move {
+            let slice = match IoVecWrapperMut::new(buf) {
+                Ok(slice) => slice,
+                Err(buf) => return (Ok(0), buf),
+            };
+
+            let (result, slice) = self.read(slice).await;
+            buf = slice.into_inner();
+            if let Ok(n) = result {
+                unsafe { buf.set_init(n) };
+            }
+            (result, buf)
         }
     }
 }
@@ -253,7 +360,7 @@ where
                 return Ok(());
             }
             // This action does not allocate.
-            let buf = std::mem::replace(buffer, BytesMut::new());
+            let buf = std::mem::take(buffer);
             let (result, buf) = self.io.write_all(buf).await;
             *buffer = buf;
             result?;
@@ -749,5 +856,45 @@ impl<Codec: Decoder, IO: AsyncReadRent, AnyCodec> NextWithCodec<Codec> for Frame
     #[inline]
     fn next_with<'a>(&'a mut self, codec: &'a mut Codec) -> Self::NextFuture<'_> {
         FramedInner::next_with(&mut self.inner.io, codec, &mut self.inner.state)
+    }
+}
+
+impl<IO: AsyncReadRent, Codec> AsyncReadRent for Framed<IO, Codec> {
+    type ReadFuture<'a, T> = <FramedInner<IO, Codec, RWState> as AsyncReadRent>::ReadFuture<'a, T>
+    where
+        T: IoBufMut + 'a, IO: 'a, Codec: 'a;
+
+    type ReadvFuture<'a, T> = <FramedInner<IO, Codec, RWState> as AsyncReadRent>::ReadvFuture<'a, T>
+    where
+        T: IoVecBufMut + 'a, IO: 'a, Codec: 'a;
+
+    #[inline]
+    fn read<T: IoBufMut>(&mut self, buf: T) -> Self::ReadFuture<'_, T> {
+        self.inner.read(buf)
+    }
+
+    #[inline]
+    fn readv<T: IoVecBufMut>(&mut self, buf: T) -> Self::ReadvFuture<'_, T> {
+        self.inner.readv(buf)
+    }
+}
+
+impl<IO: AsyncReadRent, Codec> AsyncReadRent for FramedRead<IO, Codec> {
+    type ReadFuture<'a, T> = <FramedInner<IO, Codec, ReadState> as AsyncReadRent>::ReadFuture<'a, T>
+    where
+        T: IoBufMut + 'a, IO: 'a, Codec: 'a;
+
+    type ReadvFuture<'a, T> = <FramedInner<IO, Codec, ReadState> as AsyncReadRent>::ReadvFuture<'a, T>
+    where
+        T: IoVecBufMut + 'a, IO: 'a, Codec: 'a;
+
+    #[inline]
+    fn read<T: IoBufMut>(&mut self, buf: T) -> Self::ReadFuture<'_, T> {
+        self.inner.read(buf)
+    }
+
+    #[inline]
+    fn readv<T: IoVecBufMut>(&mut self, buf: T) -> Self::ReadvFuture<'_, T> {
+        self.inner.readv(buf)
     }
 }

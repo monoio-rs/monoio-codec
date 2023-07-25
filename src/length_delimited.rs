@@ -381,7 +381,7 @@ use std::{
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use monoio::io::{AsyncReadRent, AsyncWriteRent};
 
-use crate::{Decoder, Encoder, Framed, FramedRead, FramedWrite};
+use crate::{Decoded, Decoder, Encoder, Framed, FramedRead, FramedWrite};
 
 /// Configure length delimited `LengthDelimitedCodec`s.
 ///
@@ -473,13 +473,13 @@ impl LengthDelimitedCodec {
         self.builder.max_frame_length(val);
     }
 
-    fn decode_head(&mut self, src: &mut BytesMut) -> io::Result<Option<usize>> {
+    fn decode_head(&mut self, src: &mut BytesMut) -> io::Result<Decoded<usize>> {
         let head_len = self.builder.num_head_bytes();
         let field_len = self.builder.length_field_len;
 
         if src.len() < head_len {
             // Not enough data
-            return Ok(None);
+            return Ok(Decoded::InsufficientAtLeast(head_len));
         }
 
         let n = {
@@ -534,17 +534,17 @@ impl LengthDelimitedCodec {
         // payload
         src.reserve(n);
 
-        Ok(Some(n))
+        Ok(Decoded::Some(n))
     }
 
-    fn decode_data(&self, n: usize, src: &mut BytesMut) -> Option<BytesMut> {
+    fn decode_data(&self, n: usize, src: &mut BytesMut) -> Decoded<BytesMut> {
         // At this point, the buffer has already had the required capacity
         // reserved. All there is to do is read.
         if src.len() < n {
-            return None;
+            return Decoded::InsufficientAtLeast(n);
         }
 
-        Some(src.split_to(n))
+        Decoded::Some(src.split_to(n))
     }
 }
 
@@ -552,29 +552,31 @@ impl Decoder for LengthDelimitedCodec {
     type Item = BytesMut;
     type Error = io::Error;
 
-    fn decode(&mut self, src: &mut BytesMut) -> io::Result<Option<BytesMut>> {
+    fn decode(&mut self, src: &mut BytesMut) -> io::Result<Decoded<BytesMut>> {
         let n = match self.state {
             DecodeState::Head => match self.decode_head(src)? {
-                Some(n) => {
+                Decoded::Some(n) => {
                     self.state = DecodeState::Data(n);
                     n
                 }
-                None => return Ok(None),
+                Decoded::InsufficientUnknown => return Ok(Decoded::InsufficientUnknown),
+                Decoded::InsufficientAtLeast(n) => return Ok(Decoded::InsufficientAtLeast(n)),
             },
             DecodeState::Data(n) => n,
         };
 
         match self.decode_data(n, src) {
-            Some(data) => {
+            Decoded::Some(data) => {
                 // Update the decode state
                 self.state = DecodeState::Head;
 
                 // Make sure the buffer has enough space to read the next head
                 src.reserve(self.builder.num_head_bytes());
 
-                Ok(Some(data))
+                Ok(Decoded::Some(data))
             }
-            None => Ok(None),
+            Decoded::InsufficientUnknown => Ok(Decoded::InsufficientUnknown),
+            Decoded::InsufficientAtLeast(n) => Ok(Decoded::InsufficientAtLeast(n)),
         }
     }
 }
