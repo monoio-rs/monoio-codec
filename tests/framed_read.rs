@@ -187,7 +187,7 @@ async fn multi_frames_on_eof() {
 
         fn decode_eof(&mut self, _buf: &mut BytesMut) -> io::Result<Decoded<u32>> {
             if self.0.is_empty() {
-                return Ok(Decoded::InsufficientUnknown);
+                return Ok(Decoded::Insufficient);
             }
 
             Ok(Decoded::Some(self.0.remove(0)))

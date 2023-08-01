@@ -13,7 +13,7 @@ pub enum Decoded<T> {
     Some(T),
     // The length needed is unknown.
     // Same as None in tokio_codec::Decoder
-    InsufficientUnknown,
+    Insufficient,
     // The total length needed.
     InsufficientAtLeast(usize),
 }

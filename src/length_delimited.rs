@@ -559,7 +559,7 @@ impl Decoder for LengthDelimitedCodec {
                     self.state = DecodeState::Data(n);
                     n
                 }
-                Decoded::InsufficientUnknown => return Ok(Decoded::InsufficientUnknown),
+                Decoded::Insufficient => return Ok(Decoded::Insufficient),
                 Decoded::InsufficientAtLeast(n) => return Ok(Decoded::InsufficientAtLeast(n)),
             },
             DecodeState::Data(n) => n,
@@ -575,7 +575,7 @@ impl Decoder for LengthDelimitedCodec {
 
                 Ok(Decoded::Some(data))
             }
-            Decoded::InsufficientUnknown => Ok(Decoded::InsufficientUnknown),
+            Decoded::Insufficient => Ok(Decoded::Insufficient),
             Decoded::InsufficientAtLeast(n) => Ok(Decoded::InsufficientAtLeast(n)),
         }
     }
