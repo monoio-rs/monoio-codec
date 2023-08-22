@@ -549,6 +549,11 @@ impl<IO, Codec> Framed<IO, Codec> {
         &mut self.inner.state.read.buffer
     }
 
+    /// Returns io and a mutable reference to the read buffer.
+    pub fn read_state_mut(&mut self) -> (&mut IO, &mut BytesMut) {
+        (&mut self.inner.io, &mut self.inner.state.read.buffer)
+    }
+
     /// Returns a reference to the write buffer.
     pub fn write_buffer(&self) -> &BytesMut {
         &self.inner.state.write.buffer
@@ -669,6 +674,11 @@ impl<IO, Codec> FramedRead<IO, Codec> {
     /// Returns a mutable reference to the read buffer.
     pub fn read_buffer_mut(&mut self) -> &mut BytesMut {
         &mut self.inner.state.buffer
+    }
+
+    /// Returns io and a mutable reference to the read buffer.
+    pub fn read_state_mut(&mut self) -> (&mut IO, &mut BytesMut) {
+        (&mut self.inner.io, &mut self.inner.state.buffer)
     }
 
     /// Equivalent to Stream::next but with custom codec.
