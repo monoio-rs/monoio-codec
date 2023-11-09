@@ -10,6 +10,7 @@ use bytes::{Buf, BufMut, BytesMut};
 use monoio::{
     buf::{IoBuf, IoBufMut, IoVecBuf, IoVecBufMut, IoVecWrapperMut, SliceMut},
     io::{sink::Sink, stream::Stream, AsyncReadRent, AsyncWriteRent, AsyncWriteRentExt},
+    BufResult,
 };
 
 use crate::{Decoded, Decoder, Encoder};
@@ -221,92 +222,80 @@ where
     IO: AsyncReadRent,
     S: BorrowMut<ReadState>,
 {
-    type ReadFuture<'a, T> = impl Future<Output = monoio::BufResult<usize, T>> + 'a
-    where
-        T: IoBufMut + 'a, Self: 'a;
+    async fn read<T: IoBufMut>(&mut self, mut buf: T) -> BufResult<usize, T> {
+        let read_state: &mut ReadState = self.state.borrow_mut();
+        let state = &mut read_state.state;
+        let buffer = &mut read_state.buffer;
 
-    type ReadvFuture<'a, T> = impl Future<Output = monoio::BufResult<usize, T>> + 'a
-    where
-        T: IoVecBufMut + 'a, Self: 'a;
+        if buf.bytes_total() == 0 {
+            return (Ok(0), buf);
+        }
 
-    fn read<T: IoBufMut>(&mut self, mut buf: T) -> Self::ReadFuture<'_, T> {
-        async move {
-            let read_state: &mut ReadState = self.state.borrow_mut();
-            let state = &mut read_state.state;
-            let buffer = &mut read_state.buffer;
-
-            if buf.bytes_total() == 0 {
-                return (Ok(0), buf);
-            }
-
-            // Copy existing data if there is some.
-            let to_copy = buf.bytes_total().min(buffer.len());
-            if to_copy != 0 {
-                unsafe {
-                    buf.write_ptr()
-                        .copy_from_nonoverlapping(buffer.as_ptr(), to_copy);
-                    buf.set_init(to_copy);
-                }
-                buffer.advance(to_copy);
-                return (Ok(to_copy), buf);
-            }
-
-            // Read to buf directly if buf size is bigger than some threshold.
-            if buf.bytes_total() > INITIAL_CAPACITY {
-                let (res, buf) = self.io.read(buf).await;
-                return match res {
-                    Ok(0) => {
-                        *state = State::Pausing;
-                        (Ok(0), buf)
-                    }
-                    Ok(n) => (Ok(n), buf),
-                    Err(e) => {
-                        *state = State::Errored;
-                        (Err(e), buf)
-                    }
-                };
-            }
-            // Read to inner buffer and copy to buf.
-            buffer.reserve(INITIAL_CAPACITY);
-            let owned_buffer = std::mem::take(buffer);
-            let (res, owned_buffer) = self.io.read(owned_buffer).await;
-            *buffer = owned_buffer;
-            match res {
-                Ok(0) => {
-                    *state = State::Pausing;
-                    return (Ok(0), buf);
-                }
-                Err(e) => {
-                    *state = State::Errored;
-                    return (Err(e), buf);
-                }
-                _ => (),
-            }
-            let to_copy = buf.bytes_total().min(buffer.len());
+        // Copy existing data if there is some.
+        let to_copy = buf.bytes_total().min(buffer.len());
+        if to_copy != 0 {
             unsafe {
                 buf.write_ptr()
                     .copy_from_nonoverlapping(buffer.as_ptr(), to_copy);
                 buf.set_init(to_copy);
             }
             buffer.advance(to_copy);
-            (Ok(to_copy), buf)
+            return (Ok(to_copy), buf);
         }
+
+        // Read to buf directly if buf size is bigger than some threshold.
+        if buf.bytes_total() > INITIAL_CAPACITY {
+            let (res, buf) = self.io.read(buf).await;
+            return match res {
+                Ok(0) => {
+                    *state = State::Pausing;
+                    (Ok(0), buf)
+                }
+                Ok(n) => (Ok(n), buf),
+                Err(e) => {
+                    *state = State::Errored;
+                    (Err(e), buf)
+                }
+            };
+        }
+        // Read to inner buffer and copy to buf.
+        buffer.reserve(INITIAL_CAPACITY);
+        let owned_buffer = std::mem::take(buffer);
+        let (res, owned_buffer) = self.io.read(owned_buffer).await;
+        *buffer = owned_buffer;
+        match res {
+            Ok(0) => {
+                *state = State::Pausing;
+                return (Ok(0), buf);
+            }
+            Err(e) => {
+                *state = State::Errored;
+                return (Err(e), buf);
+            }
+            _ => (),
+        }
+        let to_copy = buf.bytes_total().min(buffer.len());
+        unsafe {
+            buf.write_ptr()
+                .copy_from_nonoverlapping(buffer.as_ptr(), to_copy);
+            buf.set_init(to_copy);
+        }
+        buffer.advance(to_copy);
+        (Ok(to_copy), buf)
     }
 
-    fn readv<T: IoVecBufMut>(&mut self, mut buf: T) -> Self::ReadvFuture<'_, T> {
-        async move {
-            let slice = match IoVecWrapperMut::new(buf) {
-                Ok(slice) => slice,
-                Err(buf) => return (Ok(0), buf),
-            };
+    async fn readv<T: IoVecBufMut>(&mut self, mut buf: T) -> BufResult<usize, T> {
+        let slice = match IoVecWrapperMut::new(buf) {
+            Ok(slice) => slice,
+            Err(buf) => return (Ok(0), buf),
+        };
 
-            let (result, slice) = self.read(slice).await;
-            buf = slice.into_inner();
-            if let Ok(n) = result {
-                unsafe { buf.set_init(n) };
-            }
-            (result, buf)
+        let (result, slice) = self.read(slice).await;
+        buf = slice.into_inner();
+        if let Ok(n) = result {
+            unsafe { buf.set_init(n) };
         }
+        (result, buf)
     }
 }
 
@@ -318,10 +307,8 @@ where
 {
     type Item = Result<Codec::Item, Codec::Error>;
 
-    type NextFuture<'a> = impl Future<Output = Option<Self::Item>> + 'a where Self: 'a;
-
-    fn next(&mut self) -> Self::NextFuture<'_> {
-        Self::next_with(&mut self.io, &mut self.codec, &mut self.state)
+    async fn next(&mut self) -> Option<Self::Item> {
+        Self::next_with(&mut self.io, &mut self.codec, &mut self.state).await
     }
 }
 
@@ -330,80 +317,54 @@ where
     IO: AsyncWriteRent,
     S: BorrowMut<WriteState>,
 {
-    type WriteFuture<'a, T> = impl Future<Output = monoio::BufResult<usize, T>> + 'a
-    where
-        Self: 'a,
-        T: IoBuf + 'a;
-
-    type WritevFuture<'a, T> = impl Future<Output = monoio::BufResult<usize, T>> + 'a
-    where
-        Self: 'a,
-        T: IoVecBuf + 'a;
-
-    type FlushFuture<'a> = impl Future<Output = std::io::Result<()>> + 'a
-    where
-        Self: 'a;
-
-    type ShutdownFuture<'a> = impl Future<Output = std::io::Result<()>> + 'a
-    where
-        Self: 'a;
-
-    fn write<T: monoio::buf::IoBuf>(&mut self, buf: T) -> Self::WriteFuture<'_, T> {
-        async move {
-            let WriteState { buffer } = self.state.borrow_mut();
-            if buffer.len() >= BACKPRESSURE_BOUNDARY || buf.bytes_init() >= INITIAL_CAPACITY {
-                // flush buffer
-                if let Err(e) = AsyncWriteRent::flush(self).await {
-                    return (Err(e), buf);
-                }
-                // write directly
-                return self.io.write_all(buf).await;
+    async fn write<T: monoio::buf::IoBuf>(&mut self, buf: T) -> BufResult<usize, T> {
+        let WriteState { buffer } = self.state.borrow_mut();
+        if buffer.len() >= BACKPRESSURE_BOUNDARY || buf.bytes_init() >= INITIAL_CAPACITY {
+            // flush buffer
+            if let Err(e) = AsyncWriteRent::flush(self).await {
+                return (Err(e), buf);
             }
-            // copy to buffer
-            let mut buffer = std::mem::take(buffer);
-            let cap = buffer.capacity() - buffer.len();
-            let size = buf.bytes_init().min(cap);
-            let slice = unsafe { std::slice::from_raw_parts(buf.read_ptr(), size) };
-            buffer.copy_from_slice(slice);
-            (Ok(size), buf)
+            // write directly
+            return self.io.write_all(buf).await;
         }
+        // copy to buffer
+        let mut buffer = std::mem::take(buffer);
+        let cap = buffer.capacity() - buffer.len();
+        let size = buf.bytes_init().min(cap);
+        let slice = unsafe { std::slice::from_raw_parts(buf.read_ptr(), size) };
+        buffer.copy_from_slice(slice);
+        (Ok(size), buf)
     }
 
-    fn writev<T: monoio::buf::IoVecBuf>(&mut self, buf: T) -> Self::WritevFuture<'_, T> {
-        async move {
-            let slice = match monoio::buf::IoVecWrapper::new(buf) {
-                Ok(slice) => slice,
-                Err(buf) => return (Ok(0), buf),
-            };
+    async fn writev<T: monoio::buf::IoVecBuf>(&mut self, buf: T) -> BufResult<usize, T> {
+        let slice = match monoio::buf::IoVecWrapper::new(buf) {
+            Ok(slice) => slice,
+            Err(buf) => return (Ok(0), buf),
+        };
 
-            let (result, slice) = self.write(slice).await;
-            (result, slice.into_inner())
-        }
+        let (result, slice) = self.write(slice).await;
+        (result, slice.into_inner())
     }
 
-    fn flush(&mut self) -> Self::FlushFuture<'_> {
-        async move {
-            let WriteState { buffer } = self.state.borrow_mut();
-            if buffer.is_empty() {
-                return Ok(());
-            }
-            // This action does not allocate.
-            let buf = std::mem::take(buffer);
-            let (result, buf) = self.io.write_all(buf).await;
-            *buffer = buf;
-            result?;
-            buffer.clear();
-            self.io.flush().await?;
-            Ok(())
+    async fn flush(&mut self) -> std::io::Result<()> {
+        let WriteState { buffer } = self.state.borrow_mut();
+        if buffer.is_empty() {
+            return Ok(());
         }
+        // This action does not allocate.
+        let buf = std::mem::take(buffer);
+        let (result, buf) = self.io.write_all(buf).await;
+        *buffer = buf;
+        result?;
+        buffer.clear();
+        self.io.flush().await?;
+        Ok(())
     }
 
-    fn shutdown(&mut self) -> Self::ShutdownFuture<'_> {
-        async move {
-            AsyncWriteRent::flush(self).await?;
-            self.io.shutdown().await?;
-            Ok(())
-        }
+    async fn shutdown(&mut self) -> std::io::Result<()> {
+        AsyncWriteRent::flush(self).await?;
+        self.io.shutdown().await?;
+        Ok(())
     }
 }
 
@@ -415,38 +376,23 @@ where
 {
     type Error = Codec::Error;
 
-    type SendFuture<'a> = impl Future<Output = Result<(), Self::Error>> + 'a where Self: 'a, Item: 'a;
-
-    type FlushFuture<'a> = impl Future<Output = Result<(), Self::Error>> + 'a where Self: 'a;
-
-    type CloseFuture<'a> = impl Future<Output = Result<(), Self::Error>> + 'a where Self: 'a;
-
-    fn send<'a>(&'a mut self, item: Item) -> Self::SendFuture<'a>
-    where
-        Item: 'a,
-    {
-        async move {
-            if self.state.borrow_mut().buffer.len() >= BACKPRESSURE_BOUNDARY {
-                AsyncWriteRent::flush(self).await?;
-            }
-            self.codec
-                .encode(item, &mut self.state.borrow_mut().buffer)?;
-            Ok(())
-        }
-    }
-
-    fn flush(&mut self) -> Self::FlushFuture<'_> {
-        async move {
+    async fn send(&mut self, item: Item) -> Result<(), Self::Error> {
+        if self.state.borrow_mut().buffer.len() >= BACKPRESSURE_BOUNDARY {
             AsyncWriteRent::flush(self).await?;
-            Ok(())
         }
+        self.codec
+            .encode(item, &mut self.state.borrow_mut().buffer)?;
+        Ok(())
     }
 
-    fn close(&mut self) -> Self::CloseFuture<'_> {
-        async move {
-            AsyncWriteRent::shutdown(self).await?;
-            Ok(())
-        }
+    async fn flush(&mut self) -> Result<(), Self::Error> {
+        AsyncWriteRent::flush(self).await?;
+        Ok(())
+    }
+
+    async fn close(&mut self) -> Result<(), Self::Error> {
+        AsyncWriteRent::shutdown(self).await?;
+        Ok(())
     }
 }
 
@@ -802,12 +748,9 @@ where
 {
     type Item = <FramedInner<IO, Codec, RWState> as Stream>::Item;
 
-    type NextFuture<'a> = <FramedInner<IO, Codec, RWState> as Stream>::NextFuture<'a>
-        where Self: 'a;
-
     #[inline]
-    fn next(&mut self) -> Self::NextFuture<'_> {
-        self.inner.next()
+    async fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next().await
     }
 }
 
@@ -818,12 +761,9 @@ where
 {
     type Item = <FramedInner<IO, Codec, ReadState> as Stream>::Item;
 
-    type NextFuture<'a> = <FramedInner<IO, Codec, ReadState> as Stream>::NextFuture<'a>
-        where Self: 'a;
-
     #[inline]
-    fn next(&mut self) -> Self::NextFuture<'_> {
-        self.inner.next()
+    async fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next().await
     }
 }
 
@@ -834,35 +774,19 @@ where
 {
     type Error = <FramedInner<IO, Codec, RWState> as Sink<Item>>::Error;
 
-    type SendFuture<'a> = <FramedInner<IO, Codec, RWState> as Sink<Item>>::SendFuture<'a>
-    where
-        Self: 'a,
-        Item: 'a;
-
-    type FlushFuture<'a> = <FramedInner<IO, Codec, RWState> as Sink<Item>>::FlushFuture<'a>
-    where
-        Self: 'a;
-
-    type CloseFuture<'a> = <FramedInner<IO, Codec, RWState> as Sink<Item>>::CloseFuture<'a>
-    where
-        Self: 'a;
-
     #[inline]
-    fn send<'a>(&'a mut self, item: Item) -> Self::SendFuture<'a>
-    where
-        Item: 'a,
-    {
-        self.inner.send(item)
+    async fn send(&mut self, item: Item) -> Result<(), Self::Error> {
+        self.inner.send(item).await
     }
 
     #[inline]
-    fn flush(&mut self) -> Self::FlushFuture<'_> {
-        Sink::flush(&mut self.inner)
+    async fn flush(&mut self) -> Result<(), Self::Error> {
+        Sink::flush(&mut self.inner).await
     }
 
     #[inline]
-    fn close(&mut self) -> Self::CloseFuture<'_> {
-        self.inner.close()
+    async fn close(&mut self) -> Result<(), Self::Error> {
+        self.inner.close().await
     }
 }
 
@@ -873,185 +797,112 @@ where
 {
     type Error = <FramedInner<IO, Codec, WriteState> as Sink<Item>>::Error;
 
-    type SendFuture<'a> = <FramedInner<IO, Codec, WriteState> as Sink<Item>>::SendFuture<'a>
-    where
-        Self: 'a,
-        Item: 'a;
-
-    type FlushFuture<'a> = <FramedInner<IO, Codec, WriteState> as Sink<Item>>::FlushFuture<'a>
-    where
-        Self: 'a;
-
-    type CloseFuture<'a>=<FramedInner<IO, Codec, WriteState> as Sink<Item>>::CloseFuture<'a>
-    where
-        Self: 'a;
-
     #[inline]
-    fn send<'a>(&'a mut self, item: Item) -> Self::SendFuture<'a>
-    where
-        Item: 'a,
-    {
-        self.inner.send(item)
+    async fn send(&mut self, item: Item) -> Result<(), Self::Error> {
+        self.inner.send(item).await
     }
 
     #[inline]
-    fn flush(&mut self) -> Self::FlushFuture<'_> {
-        Sink::flush(&mut self.inner)
+    async fn flush(&mut self) -> Result<(), Self::Error> {
+        Sink::flush(&mut self.inner).await
     }
 
     #[inline]
-    fn close(&mut self) -> Self::CloseFuture<'_> {
-        self.inner.close()
+    async fn close(&mut self) -> Result<(), Self::Error> {
+        self.inner.close().await
     }
 }
 
 pub trait NextWithCodec<T> {
     type Item;
-    type NextFuture<'a>: std::future::Future<Output = Option<Self::Item>>
-    where
-        Self: 'a,
-        T: 'a;
-    fn next_with<'a>(&'a mut self, codec: &'a mut T) -> Self::NextFuture<'_>;
+
+    fn next_with<'a>(&'a mut self, codec: &'a mut T) -> impl Future<Output = Option<Self::Item>>;
 }
 
 impl<Codec: Decoder, IO: AsyncReadRent, AnyCodec> NextWithCodec<Codec>
     for FramedRead<IO, AnyCodec>
 {
     type Item = Result<Codec::Item, Codec::Error>;
-    type NextFuture<'a> = impl std::future::Future<Output = Option<Self::Item>> + 'a
-    where
-        Self: 'a, Codec: 'a;
 
     #[inline]
-    fn next_with<'a>(&'a mut self, codec: &'a mut Codec) -> Self::NextFuture<'_> {
-        FramedInner::next_with(&mut self.inner.io, codec, &mut self.inner.state)
+    async fn next_with<'a>(&'a mut self, codec: &'a mut Codec) -> Option<Self::Item> {
+        FramedInner::next_with(&mut self.inner.io, codec, &mut self.inner.state).await
     }
 }
 
 impl<Codec: Decoder, IO: AsyncReadRent, AnyCodec> NextWithCodec<Codec> for Framed<IO, AnyCodec> {
     type Item = Result<Codec::Item, Codec::Error>;
-    type NextFuture<'a> = impl std::future::Future<Output = Option<Self::Item>> + 'a
-    where
-        Self: 'a, Codec: 'a;
 
     #[inline]
-    fn next_with<'a>(&'a mut self, codec: &'a mut Codec) -> Self::NextFuture<'_> {
-        FramedInner::next_with(&mut self.inner.io, codec, &mut self.inner.state)
+    async fn next_with<'a>(&'a mut self, codec: &'a mut Codec) -> Option<Self::Item> {
+        FramedInner::next_with(&mut self.inner.io, codec, &mut self.inner.state).await
     }
 }
 
 impl<IO: AsyncReadRent, Codec> AsyncReadRent for Framed<IO, Codec> {
-    type ReadFuture<'a, T> = <FramedInner<IO, Codec, RWState> as AsyncReadRent>::ReadFuture<'a, T>
-    where
-        T: IoBufMut + 'a, IO: 'a, Codec: 'a;
-
-    type ReadvFuture<'a, T> = <FramedInner<IO, Codec, RWState> as AsyncReadRent>::ReadvFuture<'a, T>
-    where
-        T: IoVecBufMut + 'a, IO: 'a, Codec: 'a;
-
     #[inline]
-    fn read<T: IoBufMut>(&mut self, buf: T) -> Self::ReadFuture<'_, T> {
-        self.inner.read(buf)
+    async fn read<T: IoBufMut>(&mut self, buf: T) -> BufResult<usize, T> {
+        self.inner.read(buf).await
     }
 
     #[inline]
-    fn readv<T: IoVecBufMut>(&mut self, buf: T) -> Self::ReadvFuture<'_, T> {
-        self.inner.readv(buf)
+    async fn readv<T: IoVecBufMut>(&mut self, buf: T) -> BufResult<usize, T> {
+        self.inner.readv(buf).await
     }
 }
 
 impl<IO: AsyncReadRent, Codec> AsyncReadRent for FramedRead<IO, Codec> {
-    type ReadFuture<'a, T> = <FramedInner<IO, Codec, ReadState> as AsyncReadRent>::ReadFuture<'a, T>
-    where
-        T: IoBufMut + 'a, IO: 'a, Codec: 'a;
-
-    type ReadvFuture<'a, T> = <FramedInner<IO, Codec, ReadState> as AsyncReadRent>::ReadvFuture<'a, T>
-    where
-        T: IoVecBufMut + 'a, IO: 'a, Codec: 'a;
-
     #[inline]
-    fn read<T: IoBufMut>(&mut self, buf: T) -> Self::ReadFuture<'_, T> {
-        self.inner.read(buf)
+    async fn read<T: IoBufMut>(&mut self, buf: T) -> BufResult<usize, T> {
+        self.inner.read(buf).await
     }
 
     #[inline]
-    fn readv<T: IoVecBufMut>(&mut self, buf: T) -> Self::ReadvFuture<'_, T> {
-        self.inner.readv(buf)
+    async fn readv<T: IoVecBufMut>(&mut self, buf: T) -> BufResult<usize, T> {
+        self.inner.readv(buf).await
     }
 }
 
 impl<IO: AsyncWriteRent, Codec> AsyncWriteRent for Framed<IO, Codec> {
-    type WriteFuture<'a, T> = <FramedInner<IO, Codec, RWState> as AsyncWriteRent>::WriteFuture<'a, T>
-    where
-        T: IoBuf + 'a, IO: 'a, Codec: 'a;
-
-    type WritevFuture<'a, T> = <FramedInner<IO, Codec, RWState> as AsyncWriteRent>::WritevFuture<'a, T>
-    where
-        T: IoVecBuf + 'a, IO: 'a, Codec: 'a;
-
-    type FlushFuture<'a> = <FramedInner<IO, Codec, RWState> as AsyncWriteRent>::FlushFuture<'a>
-    where
-        Self: 'a;
-
-    type ShutdownFuture<'a> = <FramedInner<IO, Codec, RWState> as AsyncWriteRent>::ShutdownFuture<'a>
-    where
-        Self: 'a;
-
     #[inline]
-    fn write<T: IoBuf>(&mut self, buf: T) -> Self::WriteFuture<'_, T> {
-        self.inner.write(buf)
+    async fn write<T: IoBuf>(&mut self, buf: T) -> BufResult<usize, T> {
+        self.inner.write(buf).await
     }
 
     #[inline]
-    fn writev<T: IoVecBuf>(&mut self, buf_vec: T) -> Self::WritevFuture<'_, T> {
-        self.inner.writev(buf_vec)
+    async fn writev<T: IoVecBuf>(&mut self, buf_vec: T) -> BufResult<usize, T> {
+        self.inner.writev(buf_vec).await
     }
 
     #[inline]
-    fn flush(&mut self) -> Self::FlushFuture<'_> {
-        self.inner.flush()
+    async fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush().await
     }
 
     #[inline]
-    fn shutdown(&mut self) -> Self::ShutdownFuture<'_> {
-        self.inner.shutdown()
+    async fn shutdown(&mut self) -> std::io::Result<()> {
+        self.inner.shutdown().await
     }
 }
 
 impl<IO: AsyncWriteRent, Codec> AsyncWriteRent for FramedWrite<IO, Codec> {
-    type WriteFuture<'a, T> = <FramedInner<IO, Codec, WriteState> as AsyncWriteRent>::WriteFuture<'a, T>
-    where
-        T: IoBuf + 'a, IO: 'a, Codec: 'a;
-
-    type WritevFuture<'a, T> = <FramedInner<IO, Codec, WriteState> as AsyncWriteRent>::WritevFuture<'a, T>
-    where
-        T: IoVecBuf + 'a, IO: 'a, Codec: 'a;
-
-    type FlushFuture<'a> = <FramedInner<IO, Codec, WriteState> as AsyncWriteRent>::FlushFuture<'a>
-    where
-        Self: 'a;
-
-    type ShutdownFuture<'a> = <FramedInner<IO, Codec, WriteState> as AsyncWriteRent>::ShutdownFuture<'a>
-    where
-        Self: 'a;
-
     #[inline]
-    fn write<T: IoBuf>(&mut self, buf: T) -> Self::WriteFuture<'_, T> {
-        self.inner.write(buf)
+    async fn write<T: IoBuf>(&mut self, buf: T) -> BufResult<usize, T> {
+        self.inner.write(buf).await
     }
 
     #[inline]
-    fn writev<T: IoVecBuf>(&mut self, buf_vec: T) -> Self::WritevFuture<'_, T> {
-        self.inner.writev(buf_vec)
+    async fn writev<T: IoVecBuf>(&mut self, buf_vec: T) -> BufResult<usize, T> {
+        self.inner.writev(buf_vec).await
     }
 
     #[inline]
-    fn flush(&mut self) -> Self::FlushFuture<'_> {
-        self.inner.flush()
+    async fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush().await
     }
 
     #[inline]
-    fn shutdown(&mut self) -> Self::ShutdownFuture<'_> {
-        self.inner.shutdown()
+    async fn shutdown(&mut self) -> std::io::Result<()> {
+        self.inner.shutdown().await
     }
 }

@@ -1,9 +1,5 @@
 // Part of the helper functions and tests are borrowed from tokio-util.
-
 #![allow(stable_features)]
-#![feature(generic_associated_types)]
-#![feature(impl_trait_in_assoc_type)]
-#![feature(type_alias_impl_trait)]
 
 use std::{collections::VecDeque, io};
 
@@ -11,6 +7,7 @@ use bytes::{Buf, BytesMut};
 use monoio::{
     buf::RawBuf,
     io::{stream::Stream, AsyncReadRent},
+    BufResult,
 };
 use monoio_codec::{Decoded, Decoder, FramedRead};
 
@@ -228,39 +225,30 @@ struct Mock {
 use monoio::buf::{IoBufMut, IoVecBufMut};
 
 impl AsyncReadRent for Mock {
-    type ReadFuture<'a, B> = impl std::future::Future<Output = monoio::BufResult<usize, B>> + 'a where
-        B: IoBufMut + 'a, Self: 'a;
-    type ReadvFuture<'a, B> = impl std::future::Future<Output = monoio::BufResult<usize, B>> + 'a where
-        B: IoVecBufMut + 'a, Self: 'a;
-
-    fn read<T: IoBufMut>(&mut self, mut buf: T) -> Self::ReadFuture<'_, T> {
-        async {
-            match self.calls.pop_front() {
-                Some(Ok(data)) => {
-                    let n = data.len();
-                    debug_assert!(buf.bytes_total() >= n);
-                    unsafe {
-                        buf.write_ptr().copy_from_nonoverlapping(data.as_ptr(), n);
-                        buf.set_init(n)
-                    }
-                    (Ok(n), buf)
+    async fn read<T: IoBufMut>(&mut self, mut buf: T) -> BufResult<usize, T> {
+        match self.calls.pop_front() {
+            Some(Ok(data)) => {
+                let n = data.len();
+                debug_assert!(buf.bytes_total() >= n);
+                unsafe {
+                    buf.write_ptr().copy_from_nonoverlapping(data.as_ptr(), n);
+                    buf.set_init(n)
                 }
-                Some(Err(e)) => (Err(e), buf),
-                None => (Ok(0), buf),
+                (Ok(n), buf)
             }
+            Some(Err(e)) => (Err(e), buf),
+            None => (Ok(0), buf),
         }
     }
 
-    fn readv<T: IoVecBufMut>(&mut self, mut buf: T) -> Self::ReadvFuture<'_, T> {
-        async move {
-            let n = match unsafe { RawBuf::new_from_iovec_mut(&mut buf) } {
-                Some(raw_buf) => self.read(raw_buf).await.0,
-                None => Ok(0),
-            };
-            if let Ok(n) = n {
-                unsafe { buf.set_init(n) };
-            }
-            (n, buf)
+    async fn readv<T: IoVecBufMut>(&mut self, mut buf: T) -> BufResult<usize, T> {
+        let n = match unsafe { RawBuf::new_from_iovec_mut(&mut buf) } {
+            Some(raw_buf) => self.read(raw_buf).await.0,
+            None => Ok(0),
+        };
+        if let Ok(n) = n {
+            unsafe { buf.set_init(n) };
         }
+        (n, buf)
     }
 }
