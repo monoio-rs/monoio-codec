@@ -13,6 +13,7 @@ version = "0.3.0"
 [dependencies]
 bytes = { version = "1" }
 monoio = { version = "0.2.0", default_features = false, features = ["bytes"] }
+tokio-util = { version = "0.7", default_features = false, features = ["codec"] }
 
 [dev-dependencies]
 monoio = { version = "0.2.0", features = ["macros"] }
