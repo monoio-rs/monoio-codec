@@ -328,11 +328,10 @@ where
             return self.io.write_all(buf).await;
         }
         // copy to buffer
-        let mut buffer = std::mem::take(buffer);
         let cap = buffer.capacity() - buffer.len();
         let size = buf.bytes_init().min(cap);
         let slice = unsafe { std::slice::from_raw_parts(buf.read_ptr(), size) };
-        buffer.copy_from_slice(slice);
+        buffer.extend_from_slice(slice);
         (Ok(size), buf)
     }
 
