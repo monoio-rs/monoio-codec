@@ -99,6 +99,45 @@ impl<IO, Codec, S> FramedInner<IO, Codec, S> {
         Self { io, codec, state }
     }
 
+    async fn peek_data<'a, 'b>(io: &'b mut IO, state: &'a mut S) -> std::io::Result<&'a mut [u8]>
+    where
+        IO: AsyncReadRent,
+        S: BorrowMut<ReadState>,
+    {
+        let read_state: &mut ReadState = state.borrow_mut();
+        let state = &mut read_state.state;
+        let buffer = &mut read_state.buffer;
+
+        if !buffer.is_empty() {
+            return Ok(buffer.as_mut());
+        }
+        buffer.reserve(RESERVE);
+
+        macro_rules! ok {
+            ($result: expr, $state: expr) => {
+                match $result {
+                    Ok(x) => x,
+                    Err(e) => {
+                        *$state = State::Errored;
+                        return Err(e);
+                    }
+                }
+            };
+        }
+
+        // Read data
+        let end = buffer.capacity();
+        let owned_buf = std::mem::take(buffer);
+        let owned_slice = unsafe { SliceMut::new_unchecked(owned_buf, 0, end) };
+        let (result, owned_slice) = io.read(owned_slice).await;
+        *buffer = owned_slice.into_inner();
+        let n = ok!(result, state);
+        if n == 0 {
+            *state = State::Paused;
+        }
+        Ok(buffer.as_mut())
+    }
+
     // In tokio there are 5 states. But since we use pure async here,
     // we do not need to return Pending so we don't need to save the state
     // when Pending returned. We only need to save state when return
@@ -528,6 +567,15 @@ impl<IO, Codec> Framed<IO, Codec> {
     {
         FramedInner::next_with(&mut self.inner.io, codec, &mut self.inner.state).await
     }
+
+    /// Await some new data.
+    /// Useful to do read timeout.
+    pub fn peek_data(&mut self) -> impl Future<Output = std::io::Result<&mut [u8]>>
+    where
+        IO: AsyncReadRent,
+    {
+        FramedInner::<_, Codec, _>::peek_data(&mut self.inner.io, &mut self.inner.state)
+    }
 }
 
 impl<T, U> fmt::Debug for Framed<T, U>
@@ -635,6 +683,15 @@ impl<IO, Codec> FramedRead<IO, Codec> {
         IO: AsyncReadRent,
     {
         FramedInner::next_with(&mut self.inner.io, codec, &mut self.inner.state).await
+    }
+
+    /// Await some new data.
+    /// Useful to do read timeout.
+    pub fn peek_data(&mut self) -> impl Future<Output = std::io::Result<&mut [u8]>>
+    where
+        IO: AsyncReadRent,
+    {
+        FramedInner::<_, Codec, _>::peek_data(&mut self.inner.io, &mut self.inner.state)
     }
 }
 
