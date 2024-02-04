@@ -8,7 +8,7 @@ use crate::Framed;
 
 /// Decoder may return Decoded to represent a decoded item,
 /// or the insufficient length hint, or just the insufficient.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 pub enum Decoded<T> {
     Some(T),
     // The length needed is unknown.
@@ -16,6 +16,17 @@ pub enum Decoded<T> {
     Insufficient,
     // The total length needed.
     InsufficientAtLeast(usize),
+}
+
+impl<T> Decoded<T> {
+    #[inline]
+    pub fn unwrap(self) -> T {
+        match self {
+            Decoded::Some(inner) => inner,
+            Decoded::Insufficient => panic!("unwrap Decoded::Insufficient"),
+            Decoded::InsufficientAtLeast(_) => panic!("unwrap Decoded::InsufficientAtLeast"),
+        }
+    }
 }
 
 pub trait Decoder {
