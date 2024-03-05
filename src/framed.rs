@@ -32,6 +32,7 @@ pub struct ReadState {
 }
 
 impl ReadState {
+    #[inline]
     fn with_capacity(capacity: usize) -> Self {
         Self {
             state: State::Framing(None),
@@ -41,6 +42,7 @@ impl ReadState {
 }
 
 impl Default for ReadState {
+    #[inline]
     fn default() -> Self {
         Self::with_capacity(INITIAL_CAPACITY)
     }
@@ -60,6 +62,7 @@ pub struct WriteState {
 }
 
 impl Default for WriteState {
+    #[inline]
     fn default() -> Self {
         Self {
             buffer: BytesMut::with_capacity(INITIAL_CAPACITY),
@@ -74,28 +77,33 @@ pub struct RWState {
 }
 
 impl Borrow<ReadState> for RWState {
+    #[inline]
     fn borrow(&self) -> &ReadState {
         &self.read
     }
 }
 impl BorrowMut<ReadState> for RWState {
+    #[inline]
     fn borrow_mut(&mut self) -> &mut ReadState {
         &mut self.read
     }
 }
 impl Borrow<WriteState> for RWState {
+    #[inline]
     fn borrow(&self) -> &WriteState {
         &self.write
     }
 }
 impl BorrowMut<WriteState> for RWState {
+    #[inline]
     fn borrow_mut(&mut self) -> &mut WriteState {
         &mut self.write
     }
 }
 
 impl<IO, Codec, S> FramedInner<IO, Codec, S> {
-    fn new(io: IO, codec: Codec, state: S) -> Self {
+    #[inline]
+    const fn new(io: IO, codec: Codec, state: S) -> Self {
         Self { io, codec, state }
     }
 
@@ -254,6 +262,44 @@ impl<IO, Codec, S> FramedInner<IO, Codec, S> {
             }
         }
     }
+
+    async fn flush(io: &mut IO, state: &mut S) -> std::io::Result<()>
+    where
+        IO: AsyncWriteRent,
+        S: BorrowMut<WriteState>,
+    {
+        let WriteState { buffer } = state.borrow_mut();
+        if buffer.is_empty() {
+            return Ok(());
+        }
+        // This action does not allocate.
+        let buf = std::mem::take(buffer);
+        let (result, buf) = io.write_all(buf).await;
+        *buffer = buf;
+        result?;
+        buffer.clear();
+        io.flush().await?;
+        Ok(())
+    }
+
+    #[inline]
+    async fn send_with<Item>(
+        io: &mut IO,
+        codec: &mut Codec,
+        state: &mut S,
+        item: Item,
+    ) -> Result<(), Codec::Error>
+    where
+        IO: AsyncWriteRent,
+        Codec: Encoder<Item>,
+        S: BorrowMut<WriteState>,
+    {
+        if state.borrow_mut().buffer.len() >= BACKPRESSURE_BOUNDARY {
+            Self::flush(io, state).await?;
+        }
+        codec.encode(item, &mut state.borrow_mut().buffer)?;
+        Ok(())
+    }
 }
 
 impl<IO, Codec, S> AsyncReadRent for FramedInner<IO, Codec, S>
@@ -346,6 +392,7 @@ where
 {
     type Item = Result<Codec::Item, Codec::Error>;
 
+    #[inline]
     async fn next(&mut self) -> Option<Self::Item> {
         Self::next_with(&mut self.io, &mut self.codec, &mut self.state).await
     }
@@ -374,6 +421,7 @@ where
         (Ok(size), buf)
     }
 
+    #[inline]
     async fn writev<T: monoio::buf::IoVecBuf>(&mut self, buf: T) -> BufResult<usize, T> {
         let slice = match monoio::buf::IoVecWrapper::new(buf) {
             Ok(slice) => slice,
@@ -384,21 +432,12 @@ where
         (result, slice.into_inner())
     }
 
+    #[inline]
     async fn flush(&mut self) -> std::io::Result<()> {
-        let WriteState { buffer } = self.state.borrow_mut();
-        if buffer.is_empty() {
-            return Ok(());
-        }
-        // This action does not allocate.
-        let buf = std::mem::take(buffer);
-        let (result, buf) = self.io.write_all(buf).await;
-        *buffer = buf;
-        result?;
-        buffer.clear();
-        self.io.flush().await?;
-        Ok(())
+        FramedInner::<_, Codec, _>::flush(&mut self.io, &mut self.state).await
     }
 
+    #[inline]
     async fn shutdown(&mut self) -> std::io::Result<()> {
         AsyncWriteRent::flush(self).await?;
         self.io.shutdown().await?;
@@ -414,20 +453,23 @@ where
 {
     type Error = Codec::Error;
 
+    #[inline]
     async fn send(&mut self, item: Item) -> Result<(), Self::Error> {
         if self.state.borrow_mut().buffer.len() >= BACKPRESSURE_BOUNDARY {
-            AsyncWriteRent::flush(self).await?;
+            FramedInner::<_, Codec, _>::flush(&mut self.io, &mut self.state).await?;
         }
         self.codec
             .encode(item, &mut self.state.borrow_mut().buffer)?;
         Ok(())
     }
 
+    #[inline]
     async fn flush(&mut self) -> Result<(), Self::Error> {
         AsyncWriteRent::flush(self).await?;
         Ok(())
     }
 
+    #[inline]
     async fn close(&mut self) -> Result<(), Self::Error> {
         AsyncWriteRent::shutdown(self).await?;
         Ok(())
@@ -447,12 +489,14 @@ pub struct FramedWrite<IO, Codec> {
 }
 
 impl<IO, Codec> Framed<IO, Codec> {
+    #[inline]
     pub fn new(io: IO, codec: Codec) -> Self {
         Self {
             inner: FramedInner::new(io, codec, RWState::default()),
         }
     }
 
+    #[inline]
     pub fn with_capacity(io: IO, codec: Codec, capacity: usize) -> Self {
         Self {
             inner: FramedInner::new(
@@ -472,6 +516,7 @@ impl<IO, Codec> Framed<IO, Codec> {
     /// Note that care should be taken to not tamper with the underlying stream
     /// of data coming in as it may corrupt the stream of frames otherwise
     /// being worked with.
+    #[inline]
     pub fn get_ref(&self) -> &IO {
         &self.inner.io
     }
@@ -482,6 +527,7 @@ impl<IO, Codec> Framed<IO, Codec> {
     /// Note that care should be taken to not tamper with the underlying stream
     /// of data coming in as it may corrupt the stream of frames otherwise
     /// being worked with.
+    #[inline]
     pub fn get_mut(&mut self) -> &mut IO {
         &mut self.inner.io
     }
@@ -491,6 +537,7 @@ impl<IO, Codec> Framed<IO, Codec> {
     ///
     /// Note that care should be taken to not tamper with the underlying codec
     /// as it may corrupt the stream of frames otherwise being worked with.
+    #[inline]
     pub fn codec(&self) -> &Codec {
         &self.inner.codec
     }
@@ -500,6 +547,7 @@ impl<IO, Codec> Framed<IO, Codec> {
     ///
     /// Note that care should be taken to not tamper with the underlying codec
     /// as it may corrupt the stream of frames otherwise being worked with.
+    #[inline]
     pub fn codec_mut(&mut self) -> &mut Codec {
         &mut self.inner.codec
     }
@@ -509,6 +557,7 @@ impl<IO, Codec> Framed<IO, Codec> {
     ///
     /// Note that care should be taken to not tamper with the underlying codec
     /// as it may corrupt the stream of frames otherwise being worked with.
+    #[inline]
     pub fn map_codec<CodecNew, F>(self, map: F) -> Framed<IO, CodecNew>
     where
         F: FnOnce(Codec) -> CodecNew,
@@ -524,26 +573,31 @@ impl<IO, Codec> Framed<IO, Codec> {
     }
 
     /// Returns a reference to the read buffer.
+    #[inline]
     pub fn read_buffer(&self) -> &BytesMut {
         &self.inner.state.read.buffer
     }
 
     /// Returns a mutable reference to the read buffer.
+    #[inline]
     pub fn read_buffer_mut(&mut self) -> &mut BytesMut {
         &mut self.inner.state.read.buffer
     }
 
     /// Returns io and a mutable reference to the read buffer.
+    #[inline]
     pub fn read_state_mut(&mut self) -> (&mut IO, &mut BytesMut) {
         (&mut self.inner.io, &mut self.inner.state.read.buffer)
     }
 
     /// Returns a reference to the write buffer.
+    #[inline]
     pub fn write_buffer(&self) -> &BytesMut {
         &self.inner.state.write.buffer
     }
 
     /// Returns a mutable reference to the write buffer.
+    #[inline]
     pub fn write_buffer_mut(&mut self) -> &mut BytesMut {
         &mut self.inner.state.write.buffer
     }
@@ -553,11 +607,13 @@ impl<IO, Codec> Framed<IO, Codec> {
     /// Note that care should be taken to not tamper with the underlying stream
     /// of data coming in as it may corrupt the stream of frames otherwise
     /// being worked with.
+    #[inline]
     pub fn into_inner(self) -> IO {
         self.inner.io
     }
 
     /// Equivalent to Stream::next but with custom codec.
+    #[inline]
     pub async fn next_with<C: Decoder>(
         &mut self,
         codec: &mut C,
@@ -575,6 +631,20 @@ impl<IO, Codec> Framed<IO, Codec> {
         IO: AsyncReadRent,
     {
         FramedInner::<_, Codec, _>::peek_data(&mut self.inner.io, &mut self.inner.state)
+    }
+
+    /// Equivalent to Sink::send but with custom codec.
+    #[inline]
+    pub async fn send_with<C: Encoder<Item>, Item>(
+        &mut self,
+        codec: &mut C,
+        item: Item,
+    ) -> Result<(), C::Error>
+    where
+        IO: AsyncWriteRent,
+        C: Encoder<Item>,
+    {
+        FramedInner::send_with(&mut self.inner.io, codec, &mut self.inner.state, item).await
     }
 }
 
@@ -869,13 +939,26 @@ where
     }
 }
 
-pub trait NextWithCodec<T> {
+pub trait StreamWithCodec<T> {
     type Item;
 
     fn next_with<'a>(&'a mut self, codec: &'a mut T) -> impl Future<Output = Option<Self::Item>>;
 }
 
-impl<Codec: Decoder, IO: AsyncReadRent, AnyCodec> NextWithCodec<Codec>
+pub trait SinkWithCodec<T, Item>
+where
+    T: Encoder<Item>,
+{
+    fn send_with<'a>(
+        &'a mut self,
+        codec: &'a mut T,
+        item: Item,
+    ) -> impl Future<Output = Result<(), T::Error>>;
+
+    fn flush(&mut self) -> impl Future<Output = Result<(), T::Error>>;
+}
+
+impl<Codec: Decoder, IO: AsyncReadRent, AnyCodec> StreamWithCodec<Codec>
     for FramedRead<IO, AnyCodec>
 {
     type Item = Result<Codec::Item, Codec::Error>;
@@ -886,12 +969,52 @@ impl<Codec: Decoder, IO: AsyncReadRent, AnyCodec> NextWithCodec<Codec>
     }
 }
 
-impl<Codec: Decoder, IO: AsyncReadRent, AnyCodec> NextWithCodec<Codec> for Framed<IO, AnyCodec> {
+impl<Codec: Decoder, IO: AsyncReadRent, AnyCodec> StreamWithCodec<Codec> for Framed<IO, AnyCodec> {
     type Item = Result<Codec::Item, Codec::Error>;
 
     #[inline]
     async fn next_with<'a>(&'a mut self, codec: &'a mut Codec) -> Option<Self::Item> {
         FramedInner::next_with(&mut self.inner.io, codec, &mut self.inner.state).await
+    }
+}
+
+impl<Codec: Encoder<Item>, IO: AsyncWriteRent, AnyCodec, Item> SinkWithCodec<Codec, Item>
+    for FramedWrite<IO, AnyCodec>
+{
+    #[inline]
+    async fn send_with<'a>(
+        &'a mut self,
+        codec: &'a mut Codec,
+        item: Item,
+    ) -> Result<(), Codec::Error> {
+        FramedInner::send_with(&mut self.inner.io, codec, &mut self.inner.state, item).await
+    }
+
+    #[inline]
+    async fn flush(&mut self) -> Result<(), Codec::Error> {
+        FramedInner::<_, (), _>::flush(&mut self.inner.io, &mut self.inner.state)
+            .await
+            .map_err(|e| e.into())
+    }
+}
+
+impl<Codec: Encoder<Item>, IO: AsyncWriteRent, AnyCodec, Item> SinkWithCodec<Codec, Item>
+    for Framed<IO, AnyCodec>
+{
+    #[inline]
+    async fn send_with<'a>(
+        &'a mut self,
+        codec: &'a mut Codec,
+        item: Item,
+    ) -> Result<(), Codec::Error> {
+        FramedInner::send_with(&mut self.inner.io, codec, &mut self.inner.state, item).await
+    }
+
+    #[inline]
+    async fn flush(&mut self) -> Result<(), Codec::Error> {
+        FramedInner::<_, (), _>::flush(&mut self.inner.io, &mut self.inner.state)
+            .await
+            .map_err(|e| e.into())
     }
 }
 
