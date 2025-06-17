@@ -190,12 +190,12 @@ impl<IO, Codec, S> FramedInner<IO, Codec, S> {
                             Decoded::Some(item) => {
                                 // When we decoded something, we should clear the hint.
                                 *hint = None;
+                                buffer.clear();
                                 return Some(Ok(item));
                             }
                             Decoded::Insufficient => None,
                             Decoded::InsufficientAtLeast(size) => Some(size),
                         };
-                        buffer.clear()
                     }
 
                     let reserve = match *hint {
