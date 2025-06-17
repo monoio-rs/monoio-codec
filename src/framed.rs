@@ -117,7 +117,7 @@ impl<IO, Codec, S> FramedInner<IO, Codec, S> {
         let buffer = &mut read_state.buffer;
 
         if !buffer.is_empty() {
-            return Ok(buffer.as_mut());
+            buffer.clear()
         }
         buffer.reserve(RESERVE);
 
