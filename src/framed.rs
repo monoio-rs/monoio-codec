@@ -195,6 +195,7 @@ impl<IO, Codec, S> FramedInner<IO, Codec, S> {
                             Decoded::Insufficient => None,
                             Decoded::InsufficientAtLeast(size) => Some(size),
                         };
+                        buffer.clear()
                     }
 
                     let reserve = match *hint {
